@@ -1,5 +1,5 @@
-
-This is the implementation of CG-Taylor for  Accelerating  Diffusion Models.
+# Forecasting When to Forecast: Accelerating Diffusion Models with Confidence-Gated Taylor
+This is the implementation of CG-Taylor for DiT Models.
 
 [Forecasting When to Forecast: Accelerating Diffusion Models with Confidence-Gated Taylor](http://arxiv.org/abs/2508.02240)
 

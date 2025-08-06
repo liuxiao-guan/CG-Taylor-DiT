@@ -13,12 +13,23 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-#from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+
+# from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from timm.models.vision_transformer import PatchEmbed, Mlp
-#import os.path as osp
+
+# import os.path as osp
 from cache_functions import Attention, cal_type
-from taylor_utils import derivative_approximation, taylor_formula, taylor_cache_init, \
-    firstblock_taylor_formula,firstblock_taylor_formula, firstblock_derivative_approximation,step_taylor_formula,step_derivative_approximation
+from taylor_utils import (
+    derivative_approximation,
+    taylor_formula,
+    taylor_cache_init,
+    firstblock_taylor_formula,
+    firstblock_taylor_formula,
+    firstblock_derivative_approximation,
+    step_taylor_formula,
+    step_derivative_approximation,
+)
+
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
@@ -28,10 +39,12 @@ def modulate(x, shift, scale):
 #               Embedding Layers for Timesteps and Class Labels                 #
 #################################################################################
 
+
 class TimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
     """
+
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -54,12 +67,16 @@ class TimestepEmbedder(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
         freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+            -math.log(max_period)
+            * torch.arange(start=0, end=half, dtype=torch.float32)
+            / half
         ).to(device=t.device)
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+            embedding = torch.cat(
+                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
+            )
         return embedding
 
     def forward(self, t):
@@ -72,10 +89,13 @@ class LabelEmbedder(nn.Module):
     """
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
     """
+
     def __init__(self, num_classes, hidden_size, dropout_prob):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
+        self.embedding_table = nn.Embedding(
+            num_classes + use_cfg_embedding, hidden_size
+        )
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
 
@@ -84,7 +104,9 @@ class LabelEmbedder(nn.Module):
         Drops labels to enable classifier-free guidance.
         """
         if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+            drop_ids = (
+                torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+            )
         else:
             drop_ids = force_drop_ids == 1
         labels = torch.where(drop_ids, self.num_classes, labels)
@@ -98,26 +120,33 @@ class LabelEmbedder(nn.Module):
         return embeddings
 
 
-
 #################################################################################
 #                                 Core DiT Model                                #
 #################################################################################
+
 
 class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
+
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.attn = Attention(
+            hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs
+        )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        self.mlp = Mlp(
+            in_features=hidden_size,
+            hidden_features=mlp_hidden_dim,
+            act_layer=approx_gelu,
+            drop=0,
+        )
         self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
 
     def forward(self, x, c, current, cache_dic):
@@ -125,10 +154,17 @@ class DiTBlock(nn.Module):
 
         # FLOPs 初始化
         flops = 0
-        test_FLOPs = cache_dic.get('test_FLOPs', False)  # 检查是否启用 FLOPs 测量
-        if cache_dic['mode'] == "Firstblock":
+        test_FLOPs = cache_dic.get("test_FLOPs", False)  # 检查是否启用 FLOPs 测量
+        if cache_dic["mode"] == "Firstblock":
             # AdaLN Modulation
-            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+            (
+                shift_msa,
+                scale_msa,
+                gate_msa,
+                shift_mlp,
+                scale_mlp,
+                gate_mlp,
+            ) = self.adaLN_modulation(c).chunk(6, dim=1)
 
             # LayerNorm FLOPs (for both norm1 and norm2)
             if test_FLOPs:
@@ -139,7 +175,11 @@ class DiTBlock(nn.Module):
                 flops += B * C  # SiLU FLOPs
                 flops += B * C * 6 * C  # Linear FLOPs in adaLN_modulation
 
-            attn_output= self.attn(modulate(self.norm1(x), shift_msa, scale_msa), cache_dic=cache_dic, current=current)
+            attn_output = self.attn(
+                modulate(self.norm1(x), shift_msa, scale_msa),
+                cache_dic=cache_dic,
+                current=current,
+            )
             x = x + gate_msa.unsqueeze(1) * attn_output
 
             mlp_output = self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
@@ -148,15 +188,24 @@ class DiTBlock(nn.Module):
             # MLP FLOPs
             if test_FLOPs:
                 mlp_hidden_dim = int(C * 4)  # Assuming mlp_ratio = 4
-                flops += B * N * C * mlp_hidden_dim * 2 # First projection
-                flops += B * N * mlp_hidden_dim * C * 2# Second projection
-                flops += B * N * mlp_hidden_dim * 6 # GELU activation
+                flops += B * N * C * mlp_hidden_dim * 2  # First projection
+                flops += B * N * mlp_hidden_dim * C * 2  # Second projection
+                flops += B * N * mlp_hidden_dim * 6  # GELU activation
         else:
-        
-            if current['type'] == 'full':  # Force Activation: Compute all tokens and save them in cache
-                
+
+            if (
+                current["type"] == "full"
+            ):  # Force Activation: Compute all tokens and save them in cache
+
                 # AdaLN Modulation
-                shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+                (
+                    shift_msa,
+                    scale_msa,
+                    gate_msa,
+                    shift_mlp,
+                    scale_mlp,
+                    gate_mlp,
+                ) = self.adaLN_modulation(c).chunk(6, dim=1)
 
                 # LayerNorm FLOPs (for both norm1 and norm2)
                 if test_FLOPs:
@@ -167,45 +216,55 @@ class DiTBlock(nn.Module):
                     flops += B * C  # SiLU FLOPs
                     flops += B * C * 6 * C  # Linear FLOPs in adaLN_modulation
 
-                current['module'] = 'attn'
+                current["module"] = "attn"
                 taylor_cache_init(cache_dic, current)
-                attn_output= self.attn(modulate(self.norm1(x), shift_msa, scale_msa), cache_dic=cache_dic, current=current)
-                #cache_dic['cache'][-1][layer]['attn'] = attn_output
+                attn_output = self.attn(
+                    modulate(self.norm1(x), shift_msa, scale_msa),
+                    cache_dic=cache_dic,
+                    current=current,
+                )
+                # cache_dic['cache'][-1][layer]['attn'] = attn_output
                 derivative_approximation(cache_dic, current, attn_output)
                 x = x + gate_msa.unsqueeze(1) * attn_output
 
-                current['module'] = 'mlp'
+                current["module"] = "mlp"
                 taylor_cache_init(cache_dic, current)
                 mlp_output = self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-                #cache_dic['cache'][-1][layer]['mlp'] = mlp_output
+                # cache_dic['cache'][-1][layer]['mlp'] = mlp_output
                 derivative_approximation(cache_dic, current, mlp_output)
                 x = x + gate_mlp.unsqueeze(1) * mlp_output
 
                 # MLP FLOPs
                 if test_FLOPs:
                     mlp_hidden_dim = int(C * 4)  # Assuming mlp_ratio = 4
-                    flops += B * N * C * mlp_hidden_dim * 2 # First projection
-                    flops += B * N * mlp_hidden_dim * C * 2# Second projection
-                    flops += B * N * mlp_hidden_dim * 6 # GELU activation
+                    flops += B * N * C * mlp_hidden_dim * 2  # First projection
+                    flops += B * N * mlp_hidden_dim * C * 2  # Second projection
+                    flops += B * N * mlp_hidden_dim * 6  # GELU activation
 
-            elif current['type'] == 'Taylor':
+            elif current["type"] == "Taylor":
 
                 # AdaLN Modulation
-                shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-                
+                (
+                    shift_msa,
+                    scale_msa,
+                    gate_msa,
+                    shift_mlp,
+                    scale_mlp,
+                    gate_mlp,
+                ) = self.adaLN_modulation(c).chunk(6, dim=1)
+
                 # AdaLN FLOPs (SiLU and Linear)
                 if test_FLOPs:
                     flops += B * C  # SiLU FLOPs
                     flops += B * C * 6 * C  # Linear FLOPs in adaLN_modulation
 
-                current['module'] = 'attn'
+                current["module"] = "attn"
                 x = x + gate_msa.unsqueeze(1) * taylor_formula(cache_dic, current)
 
-                current['module'] = 'mlp'
+                current["module"] = "mlp"
                 x = x + gate_mlp.unsqueeze(1) * taylor_formula(cache_dic, current)
 
-
-        cache_dic['flops'] += flops
+        cache_dic["flops"] += flops
 
         return x
 
@@ -214,13 +273,15 @@ class FinalLayer(nn.Module):
     """
     The final layer of DiT.
     """
+
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
+        self.linear = nn.Linear(
+            hidden_size, patch_size * patch_size * out_channels, bias=True
+        )
         self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+            nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         )
 
     def forward(self, x, c):
@@ -234,6 +295,7 @@ class DiT(nn.Module):
     """
     Diffusion model with a Transformer backbone.
     """
+
     def __init__(
         self,
         input_size=32,
@@ -246,11 +308,10 @@ class DiT(nn.Module):
         class_dropout_prob=0.1,
         num_classes=1000,
         learn_sigma=True,
-        cnt = 0,
-        num_steps= 50,
-        pre_firstblock_hidden_states = None,
-        predict_loss =None
-
+        cnt=0,
+        num_steps=50,
+        pre_firstblock_hidden_states=None,
+        predict_loss=None,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -259,23 +320,29 @@ class DiT(nn.Module):
         self.patch_size = patch_size
         self.num_heads = num_heads
 
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.x_embedder = PatchEmbed(
+            input_size, patch_size, in_channels, hidden_size, bias=True
+        )
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, num_patches, hidden_size), requires_grad=False
+        )
 
-        self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio)
+                for _ in range(depth)
+            ]
+        )
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
-        self.cnt= cnt
+        self.cnt = cnt
         self.num_steps = num_steps
         self.pre_firstblock_hidden_states = pre_firstblock_hidden_states
         self.predict_loss = predict_loss
-
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -284,10 +351,13 @@ class DiT(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(_basic_init)
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
+        pos_embed = get_2d_sincos_pos_embed(
+            self.pos_embed.shape[-1], int(self.x_embedder.num_patches**0.5)
+        )
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
@@ -324,11 +394,11 @@ class DiT(nn.Module):
         assert h * w == x.shape[1]
 
         x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
-        x = torch.einsum('nhwpqc->nchpwq', x)
+        x = torch.einsum("nhwpqc->nchpwq", x)
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    #def forward(self, x, t, y):
+    # def forward(self, x, t, y):
     #    """
     #    Forward pass of DiT.
     #    x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -344,91 +414,97 @@ class DiT(nn.Module):
     #    x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
     #    x = self.unpatchify(x)                   # (N, out_channels, H, W)
     #    return x
-    
-    def forward(self, x, t, current, cache_dic, y,**kwargs): 
+
+    def forward(self, x, t, current, cache_dic, y, **kwargs):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
-        """ 
+        """
 
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        t = self.t_embedder(t)                   # (N, D)
-        y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y  
-        if cache_dic['mode'] == "Firstblock":
-            pre_firstblock_hidden_states = firstblock_taylor_formula(cache_dic=cache_dic, current=current)
-            current['type'] = 'full'
-            x= self.blocks[0](x, c, current, cache_dic)  
-            if self.cnt >kwargs['args'].mid_cor:
-                self.predict_loss = (pre_firstblock_hidden_states - x).abs().mean()/x.abs().mean()
-                can_use_cache = self.predict_loss < kwargs['args'].threshold
+        x = (
+            self.x_embedder(x) + self.pos_embed
+        )  # (N, T, D), where T = H * W / patch_size ** 2
+        t = self.t_embedder(t)  # (N, D)
+        y = self.y_embedder(y, self.training)  # (N, D)
+        c = t + y
+        if cache_dic["mode"] == "Firstblock":
+            pre_firstblock_hidden_states = firstblock_taylor_formula(
+                cache_dic=cache_dic, current=current
+            )
+            current["type"] = "full"
+            x = self.blocks[0](x, c, current, cache_dic)
+            if self.cnt > kwargs["args"].mid_cor:
+                self.predict_loss = (
+                    pre_firstblock_hidden_states - x
+                ).abs().mean() / x.abs().mean()
+                can_use_cache = self.predict_loss < kwargs["args"].threshold
                 if can_use_cache == False:
                     # 要用block得输入来预测
-                    current['block_activated_steps'].append(current['step'])
-                    firstblock_derivative_approximation(cache_dic=cache_dic,current=current, feature=x)
+                    current["block_activated_steps"].append(current["step"])
+                    firstblock_derivative_approximation(
+                        cache_dic=cache_dic, current=current, feature=x
+                    )
             else:
                 # 要用block得输入来预测
-                current['block_activated_steps'].append(current['step'])
-                firstblock_derivative_approximation(cache_dic=cache_dic,current=current, feature=x)
+                current["block_activated_steps"].append(current["step"])
+                firstblock_derivative_approximation(
+                    cache_dic=cache_dic, current=current, feature=x
+                )
             if self.cnt == 0 or self.cnt == self.num_steps - 1:
                 should_calc = True
                 self.pre_firstblock_hidden_states = None
-                self.predict_hidden_states=None
-                self.predict_loss=None
+                self.predict_hidden_states = None
+                self.predict_loss = None
                 self.pre_compute_hidden = None
             else:
                 if self.predict_loss is None:
                     can_use_cache = False
-                #else:
-                #can_use_cache = self.predict_loss < self.threshold
+                # else:
+                # can_use_cache = self.predict_loss < self.threshold
                 should_calc = not can_use_cache
-            self.cnt +=1
+            self.cnt += 1
             if self.cnt == self.num_steps:
-                self.cnt =0
+                self.cnt = 0
 
-            
-        
-            
-        if cache_dic['mode'] == "Firstblock":
+        if cache_dic["mode"] == "Firstblock":
             if not should_calc:
                 x = step_taylor_formula(cache_dic=cache_dic, current=current)
             else:
-                current['activated_steps'].append(current['step'])
-                current['type'] = 'full'
+                current["activated_steps"].append(current["step"])
+                current["type"] = "full"
                 for layeridx, block in enumerate(self.blocks):
-                    if layeridx ==0:
+                    if layeridx == 0:
                         continue
-                    x = block(x, c, current, cache_dic)  
-                step_derivative_approximation(cache_dic=cache_dic, current=current, feature=x)
-                
-                                          
+                    x = block(x, c, current, cache_dic)
+                step_derivative_approximation(
+                    cache_dic=cache_dic, current=current, feature=x
+                )
+
         else:
-                                          # (N, D)
-            
-                
+            # (N, D)
+
             cal_type(cache_dic, current)
             for layeridx, block in enumerate(self.blocks):
-                current['layer'] = layeridx
-                x = block(x, c, current, cache_dic)                      # (N, T, D)
+                current["layer"] = layeridx
+                x = block(x, c, current, cache_dic)  # (N, T, D)
 
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
-        x = self.unpatchify(x)    
-                       # (N, out_channels, H, W)
+        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)
+        # (N, out_channels, H, W)
         return x
 
-    
     def forward_with_cfg(self, x, t, current, cache_dic, y, cfg_scale, **kwargs):
-    #def forward_with_cfg(self, x, t, y, cfg_scale):
+        # def forward_with_cfg(self, x, t, y, cfg_scale):
         """
         Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        #model_out = self.forward(combined, t, y)
-        model_out = self.forward(combined, t, current, cache_dic, y,**kwargs)
+        # model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, current, cache_dic, y, **kwargs)
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
@@ -438,14 +514,13 @@ class DiT(nn.Module):
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
-    
-
 
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
 #################################################################################
 # https://github.com/facebookresearch/mae/blob/main/util/pos_embed.py
+
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
     """
@@ -461,7 +536,9 @@ def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=
     grid = grid.reshape([2, 1, grid_size, grid_size])
     pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
     if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
+        pos_embed = np.concatenate(
+            [np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0
+        )
     return pos_embed
 
 
@@ -472,7 +549,7 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
     emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
     emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
 
-    emb = np.concatenate([emb_h, emb_w], axis=1) # (H*W, D)
+    emb = np.concatenate([emb_h, emb_w], axis=1)  # (H*W, D)
     return emb
 
 
@@ -484,14 +561,14 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     """
     assert embed_dim % 2 == 0
     omega = np.arange(embed_dim // 2, dtype=np.float64)
-    omega /= embed_dim / 2.
-    omega = 1. / 10000**omega  # (D/2,)
+    omega /= embed_dim / 2.0
+    omega = 1.0 / 10000**omega  # (D/2,)
 
     pos = pos.reshape(-1)  # (M,)
-    out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
+    out = np.einsum("m,d->md", pos, omega)  # (M, D/2), outer product
 
-    emb_sin = np.sin(out) # (M, D/2)
-    emb_cos = np.cos(out) # (M, D/2)
+    emb_sin = np.sin(out)  # (M, D/2)
+    emb_cos = np.cos(out)  # (M, D/2)
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
@@ -501,46 +578,66 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #                                   DiT Configs                                  #
 #################################################################################
 
+
 def DiT_XL_2(**kwargs):
     return DiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
+
 
 def DiT_XL_4(**kwargs):
     return DiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
 
+
 def DiT_XL_8(**kwargs):
     return DiT(depth=28, hidden_size=1152, patch_size=8, num_heads=16, **kwargs)
+
 
 def DiT_L_2(**kwargs):
     return DiT(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
 
+
 def DiT_L_4(**kwargs):
     return DiT(depth=24, hidden_size=1024, patch_size=4, num_heads=16, **kwargs)
+
 
 def DiT_L_8(**kwargs):
     return DiT(depth=24, hidden_size=1024, patch_size=8, num_heads=16, **kwargs)
 
+
 def DiT_B_2(**kwargs):
     return DiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
+
 
 def DiT_B_4(**kwargs):
     return DiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
 
+
 def DiT_B_8(**kwargs):
     return DiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
+
 
 def DiT_S_2(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
 
+
 def DiT_S_4(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
+
 
 def DiT_S_8(**kwargs):
     return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
 
 
 DiT_models = {
-    'DiT-XL/2': DiT_XL_2,  'DiT-XL/4': DiT_XL_4,  'DiT-XL/8': DiT_XL_8,
-    'DiT-L/2':  DiT_L_2,   'DiT-L/4':  DiT_L_4,   'DiT-L/8':  DiT_L_8,
-    'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
-    'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8,
+    "DiT-XL/2": DiT_XL_2,
+    "DiT-XL/4": DiT_XL_4,
+    "DiT-XL/8": DiT_XL_8,
+    "DiT-L/2": DiT_L_2,
+    "DiT-L/4": DiT_L_4,
+    "DiT-L/8": DiT_L_8,
+    "DiT-B/2": DiT_B_2,
+    "DiT-B/4": DiT_B_4,
+    "DiT-B/8": DiT_B_8,
+    "DiT-S/2": DiT_S_2,
+    "DiT-S/4": DiT_S_4,
+    "DiT-S/8": DiT_S_8,
 }

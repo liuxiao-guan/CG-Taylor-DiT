@@ -24,7 +24,7 @@ from PIL import Image
 import numpy as np
 import math
 import argparse
-import time 
+import time
 
 
 def create_npz_from_sample_folder(sample_dir, num=50_000):
@@ -43,13 +43,18 @@ def create_npz_from_sample_folder(sample_dir, num=50_000):
     print(f"Saved .npz file to {npz_path} [shape={samples.shape}].")
     return npz_path
 
+
 def main(args):
     """
     Run sampling.
     """
 
-    torch.backends.cuda.matmul.allow_tf32 = args.tf32  # True: fast but may lead to some small numerical differences
-    assert torch.cuda.is_available(), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    torch.backends.cuda.matmul.allow_tf32 = (
+        args.tf32
+    )  # True: fast but may lead to some small numerical differences
+    assert (
+        torch.cuda.is_available()
+    ), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
     torch.set_grad_enabled(False)
 
     # Setup DDP:
@@ -62,34 +67,42 @@ def main(args):
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
     if args.ckpt is None:
-        assert args.model == "DiT-XL/2", "Only DiT-XL/2 models are available for auto-download."
+        assert (
+            args.model == "DiT-XL/2"
+        ), "Only DiT-XL/2 models are available for auto-download."
         assert args.image_size in [256, 512]
         assert args.num_classes == 1000
 
     # Load model:
     latent_size = args.image_size // 8
     model = DiT_models[args.model](
-        input_size=latent_size,
-        num_classes=args.num_classes
+        input_size=latent_size, num_classes=args.num_classes
     ).to(device)
     # Auto-download a pre-trained model or load a custom DiT checkpoint from train.py:
-    ckpt_path = args.ckpt or f"./pretrained_models/DiT-XL-2-{args.image_size}x{args.image_size}.pt"
+    ckpt_path = (
+        args.ckpt
+        or f"./pretrained_models/DiT-XL-2-{args.image_size}x{args.image_size}.pt"
+    )
     state_dict = find_model(ckpt_path)
     model.load_state_dict(state_dict)
     model.eval()  # important!
     diffusion = create_diffusion(str(args.num_sampling_steps))
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
-    #vae = AutoencoderKL.from_pretrained(f"/root/autodl-tmp/pretrained_models/stabilityai/sd-vae-ft-{args.vae}").to(device)
+    # vae = AutoencoderKL.from_pretrained(f"/root/autodl-tmp/pretrained_models/stabilityai/sd-vae-ft-{args.vae}").to(device)
     assert args.cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"
     using_cfg = args.cfg_scale > 1.0
-    #print("cfg scale = ", args.cfg_scale, flush=True)
+    # print("cfg scale = ", args.cfg_scale, flush=True)
 
     # Create folder to save samples:
     model_string_name = args.model.replace("/", "-")
-    ckpt_string_name = os.path.basename(args.ckpt).replace(".pt", "") if args.ckpt else "pretrained"
-    folder_name = f"{args.mode}-rel{args.threshold}-mid_cor{args.mid_cor}-max_block_order{args.max_block_order}-inter{args.interval}-max_order{args.max_order}" \
-                  f"cfg{args.cfg_scale}-seed{args.global_seed}-step{args.num_sampling_steps}"
-                
+    ckpt_string_name = (
+        os.path.basename(args.ckpt).replace(".pt", "") if args.ckpt else "pretrained"
+    )
+    folder_name = (
+        f"{args.mode}-rel{args.threshold}-mid_cor{args.mid_cor}-max_block_order{args.max_block_order}-inter{args.interval}-max_order{args.max_order}"
+        f"cfg{args.cfg_scale}-seed{args.global_seed}-step{args.num_sampling_steps}"
+    )
+
     sample_folder_dir = f"{args.sample_dir}/{folder_name}"
     if rank == 0:
         os.makedirs(sample_folder_dir, exist_ok=True)
@@ -100,17 +113,23 @@ def main(args):
     n = args.per_proc_batch_size
     global_batch_size = n * dist.get_world_size()
     # To make things evenly-divisible, we'll sample a bit more than we need and then discard the extra samples:
-    total_samples = int(math.ceil(args.num_fid_samples / global_batch_size) * global_batch_size)
+    total_samples = int(
+        math.ceil(args.num_fid_samples / global_batch_size) * global_batch_size
+    )
     if rank == 0:
         print(f"Total number of images that will be sampled: {total_samples}")
-    assert total_samples % dist.get_world_size() == 0, "total_samples must be divisible by world_size"
+    assert (
+        total_samples % dist.get_world_size() == 0
+    ), "total_samples must be divisible by world_size"
     samples_needed_this_gpu = int(total_samples // dist.get_world_size())
-    assert samples_needed_this_gpu % n == 0, "samples_needed_this_gpu must be divisible by the per-GPU batch size"
+    assert (
+        samples_needed_this_gpu % n == 0
+    ), "samples_needed_this_gpu must be divisible by the per-GPU batch size"
     iterations = int(samples_needed_this_gpu // n)
     pbar = range(iterations)
     pbar = tqdm(pbar) if rank == 0 else pbar
     total = 0
-    total_time =0 
+    total_time = 0
     for _ in pbar:
         # Sample inputs:
         z = torch.randn(n, model.in_channels, latent_size, latent_size, device=device)
@@ -127,23 +146,35 @@ def main(args):
             model_kwargs = dict(y=y)
             sample_fn = model.forward
 
-        model_kwargs['interval']        = args.interval
-        model_kwargs['max_order']       = args.max_order
-        model_kwargs['test_FLOPs']      = args.test_FLOPs
-        model_kwargs['args']            = args
-        model_kwargs['mode']            = args.mode 
-        model_kwargs['max_block_order'] = args.max_block_order
-        start =time.time()
+        model_kwargs["interval"] = args.interval
+        model_kwargs["max_order"] = args.max_order
+        model_kwargs["test_FLOPs"] = args.test_FLOPs
+        model_kwargs["args"] = args
+        model_kwargs["mode"] = args.mode
+        model_kwargs["max_block_order"] = args.max_block_order
+        start = time.time()
         # Sample images:
         if args.ddim_sample:
             samples = diffusion.ddim_sample_loop(
-                sample_fn, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device
+                sample_fn,
+                z.shape,
+                z,
+                clip_denoised=False,
+                model_kwargs=model_kwargs,
+                progress=False,
+                device=device,
             )
         else:
             samples = diffusion.p_sample_loop(
-                sample_fn, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device,
+                sample_fn,
+                z.shape,
+                z,
+                clip_denoised=False,
+                model_kwargs=model_kwargs,
+                progress=False,
+                device=device,
             )
-        end =time.time()
+        end = time.time()
         print(f"rank time: {end - start}")
         total_time += end - start
         print(f"total_time:{total_time}")
@@ -151,7 +182,12 @@ def main(args):
             samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
 
         samples = vae.decode(samples / 0.18215).sample
-        samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+        samples = (
+            torch.clamp(127.5 * samples + 128.0, 0, 255)
+            .permute(0, 2, 3, 1)
+            .to("cpu", dtype=torch.uint8)
+            .numpy()
+        )
 
         # Save samples to disk as individual .png files
         for i, sample in enumerate(samples):
@@ -162,14 +198,16 @@ def main(args):
     # 平均时间计算
     avg_time = total_time / total_samples
     # 获取最后一段作为文件名
-    file_name = os.path.basename(sample_folder_dir)  # -> 'firstblock_taylorseer0.07_300'
+    file_name = os.path.basename(
+        sample_folder_dir
+    )  # -> 'firstblock_taylorseer0.07_300'
     # 构造要写入的字符串
     content = f"{file_name}: Total {total_time:.2f}s, Avg {avg_time:.7f}s/image"
     # 写入到 file_name.txt
     txt_path = f"./output/{file_name}.txt"
     with open(txt_path, "w") as f:
         f.write(content)
-    
+
     # Make sure all processes have finished saving their samples before attempting to convert to .npz
     dist.barrier()
     if rank == 0:
@@ -181,31 +219,47 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
-    parser.add_argument("--vae",  type=str, choices=["ema", "mse"], default="ema")
-    parser.add_argument("--sample-dir", type=str, default="/root/paddlejob/workspace/env_run/gxl/output/PaddleMIX/inf_speed_dit") # Change this to your desired sample directory
+    parser.add_argument(
+        "--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2"
+    )
+    parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")
+    parser.add_argument(
+        "--sample-dir",
+        type=str,
+        default="/root/paddlejob/workspace/env_run/gxl/output/PaddleMIX/inf_speed_dit",
+    )  # Change this to your desired sample directory
     parser.add_argument("--per-proc-batch-size", type=int, default=32)
     parser.add_argument("--num-fid-samples", type=int, default=50_000)
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
-    parser.add_argument("--cfg-scale",  type=float, default=1.5)
+    parser.add_argument("--cfg-scale", type=float, default=1.5)
     parser.add_argument("--num-sampling-steps", type=int, default=250)
     parser.add_argument("--global-seed", type=int, default=0)
-    parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=True,
-                        help="By default, use TF32 matmuls. This massively accelerates sampling on Ampere GPUs.")
-    parser.add_argument("--ckpt", type=str, default=None,
-                        help="Optional path to a DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).")
+    parser.add_argument(
+        "--tf32",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="By default, use TF32 matmuls. This massively accelerates sampling on Ampere GPUs.",
+    )
+    parser.add_argument(
+        "--ckpt",
+        type=str,
+        default=None,
+        help="Optional path to a DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).",
+    )
     parser.add_argument("--ddim-sample", action="store_true", default=False)
-    parser.add_argument("--interval", type=int, default=0) 
+    parser.add_argument("--interval", type=int, default=0)
     parser.add_argument("--max-order", type=int, default=1)
     parser.add_argument("--max_block_order", type=int, default=1)
 
     parser.add_argument("--test-FLOPs", action="store_true", default=False)
     parser.add_argument("--threshold", type=float, default=0.01)
-    parser.add_argument("--mode", type=str,choices=["Firstblock", "Taylorseer"], default="Firstblock")
+    parser.add_argument(
+        "--mode", type=str, choices=["Firstblock", "Taylorseer"], default="Firstblock"
+    )
     parser.add_argument("--mid_cor", type=int, default=4)
-    
-    #parser.add_argument("--merge-weight", type=float, default=0.0) # never used in toca, just for exploration
+
+    # parser.add_argument("--merge-weight", type=float, default=0.0) # never used in toca, just for exploration
 
     args = parser.parse_args()
     main(args)
