@@ -1,0 +1,4 @@
+output/*
+pretrained_models/*
+.vscode/
+__pycache__
